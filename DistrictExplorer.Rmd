@@ -1,0 +1,410 @@
+---
+title: "DistrictExplorer"
+runtime: shiny
+#author: "Faaiz Ajaz"
+#date: "October 10, 2018"
+output:
+    flexdashboard::flex_dashboard:
+        orientation: rows
+        vertical_layout: fill
+        #source_code: https://github.com/faaizajaz
+        theme: flatly
+
+---
+
+
+```{r setup, include=FALSE}
+
+library(shiny)
+library(DT)
+library(ggplot2)
+library(leaflet)
+library(rgdal)
+library(readxl)
+library(mapview)
+library(radarchart)
+library(plotly)
+
+# Read in data
+dist_data <- read_excel("AppData/Tables/dist_data.xls")
+
+# Convert data to DT
+dist_dt <- datatable(dist_data[,1],
+    class = "compact",
+    selection = "multiple",
+    #height = "100%",    
+    options = list(
+        paging = FALSE,
+        searching = FALSE,
+        info = FALSE,
+        scrollY = FALSE,
+        scrollX = FALSE
+        #scrollCollapse = TRUE
+    )
+)
+
+    
+# Column name aliases for dist_data
+all_col_names <- c(
+    "District",
+    "Index",
+    "Registered Voter %",
+    "Female Literacy %",
+    "GPI Primary",
+    "GPI Secondary",
+    "Immunization %",
+    "Iodized Salt Use %",
+    "Non-solid Fuel Use %",
+    "Electricity for Lighting %",
+    "Gas for Cooking %",
+    "Improved Drinking Water %",
+    "Scaled VOP",
+    "Scaled Daily Persons Employed",
+    "Scaled Road Length"
+)
+
+# Read in map data
+districts_shp <- readOGR(
+    "AppData/Shapefiles/district_scores.shp",
+    layer = "district_scores",
+    GDAL1_integer64_policy = TRUE
+)
+
+```
+
+
+
+
+<!--District Overview Tab-->
+
+District Overview
+======================================================================
+
+Sidebar {.sidebar}
+----------------------------------------------------------------------
+
+```{r}
+
+dataTableOutput("district_select")
+
+output$district_select <- renderDataTable(
+    dist_dt
+) 
+
+
+
+
+```
+
+Row
+----------------------------------------------------------------------
+### Radar Chart
+
+```{r}
+
+output$overview_radar <- renderChartJSRadar({
+    
+    row_sel <- input$district_select_rows_selected
+    col_sel <- -(1:2)
+    
+    # Create list for radar chart (see docs for list format)
+    radar_list = list()
+    
+    # Loop through selected rows
+    for (i in 1:length(row_sel)) {
+        # Store name of current district
+        dist_name <- paste0(dist_data[row_sel[i], 1])
+        # Append list with district name and selected columns
+        radar_list[[dist_name]] <- as.numeric(dist_data[row_sel[i], col_sel]) 
+    }
+    
+    # Store aliases for selected columns from lookup table
+    col_names_sel <- all_col_names[col_sel]
+    
+    chartJSRadar(
+        scores = radar_list,
+        labs = col_names_sel,
+        maxScale = NULL,
+        labelSize = 10,
+        polyAlpha = 0,
+        scaleStepWidth = 20
+    )
+})
+
+chartJSRadarOutput("overview_radar")
+
+```
+
+
+### Bar Chart
+
+```{r}
+
+
+output$stacked_bar <- renderPlotly({
+    
+    row_sel <- input$district_select_rows_selected
+    #col_sel <- -(1:2)
+    col_sel <- c(3:15)
+    
+    dist_vals <- unlist(as.vector(t(dist_data[row_sel, col_sel])))
+    
+    var_sel <- all_col_names[col_sel]
+    dist_names <- rep(unlist(as.vector(t(dist_data[row_sel, 1]))), each = length(col_sel))
+    
+    plot_data <- data.frame(dist_names, var_sel, dist_vals)
+    
+    stacked_bar <- ggplot(
+        plot_data,
+        aes(
+            fill = var_sel,
+            y = dist_vals,
+            x = dist_names
+        )
+    ) + geom_bar(stat = "identity")
+    
+    ggplotly(stacked_bar) %>% 
+    config(displayModeBar = FALSE) %>% 
+    layout(
+        legend = list(
+            font = list(
+            family = "helvetica", size = 10
+            )
+        )
+    )
+
+})
+
+plotlyOutput("stacked_bar")
+
+
+```
+
+
+Row
+----------------------------------------------------------------------
+### Something Else
+
+
+<!--TLC Tab-->
+
+Traffic Light Classification
+======================================================================
+
+Sidebar {.sidebar}
+----------------------------------------------------------------------
+__Choose TLC levels to display__
+
+```{r}
+checkboxGroupInput(
+    "tlc_display_choice",
+    NULL,
+    c(
+        "Green" = "GREEN",
+        "Yellow" = "YELLOW",
+        "Red" = "RED"
+    ),
+    selected = c(
+        "GREEN",
+        "YELLOW",
+        "RED"
+    )
+)
+
+```
+__Set TLC bins__
+
+```{r}
+splitLayout(
+    numericInput(
+        'yellow_low',
+        "Yellow cut-off",
+        150,
+        min = 0,
+        step = 10
+    ),
+    numericInput(
+        'green_low',
+        "Green cut-off",
+        300,
+        min = 0,
+        step = 10
+    )
+)
+
+
+# Update TLC map button
+actionButton(
+    "update_tlc",
+    "Update",
+    width = "100%"
+)
+
+# Get values of bin inputs
+yellow_low <- reactive({
+    input$yellow_low
+})
+
+green_low <- reactive({
+    input$green_low
+})
+
+```
+
+Row
+----------------------------------------------------------------------
+### Traffic Light Classification
+
+```{r}
+
+# Set values to pop up when districts are clicked
+tlc_popups <- c("DISTRICT", "int_score", "PROVINCE")
+
+
+output$tlc_map <- renderLeaflet({
+    isolate({
+        
+        # Set categories to display
+        if ("GREEN" %in% input$tlc_display_choice)
+            green_sel <- "green"
+        else 
+            green_sel <- "gray50"
+        
+        if ("YELLOW" %in% input$tlc_display_choice)
+            yellow_sel <- "yellow"
+        else
+            yellow_sel <- "gray50"
+        
+        if ("RED" %in% input$tlc_display_choice)
+            red_sel <- "red"
+        else
+            red_sel <- "gray50"
+        
+        # Make palette
+        tlc_bin_palette <- colorBin(
+            c(
+                red_sel, yellow_sel, green_sel
+            ),
+            0:400,
+            bins = c(0, yellow_low(), green_low(), 400)
+        )
+        
+        # Make initial TLC map
+        leaflet(districts_shp) %>% addPolygons(
+            color = "#444444",
+            weight = 1,
+            label = districts_shp$DISTRICT,
+            popup = popupTable(
+                districts_shp,
+                zcol = tlc_popups,
+                row.numbers = FALSE
+            ),
+            smoothFactor = 1,
+            opacity = 1.0,
+            fillOpacity = 0.8,
+            fillColor = ~ tlc_bin_palette(int_score),
+            highlightOptions = highlightOptions(
+                color = "white",
+                weight = 2,
+                bringToFront = TRUE
+            )
+        ) %>%
+        
+        addProviderTiles(
+            provider = "OpenStreetMap.BlackAndWhite"
+        ) %>%
+        
+        addLegend(
+            "bottomright",
+            pal = tlc_bin_palette,
+            values = ~ int_score,
+            title = "Legend",
+            labFormat = labelFormat(""),
+            opacity = 1
+        )
+        
+    })
+    
+})
+
+# Observer function for update button
+observeEvent(input$update_tlc, {
+    # Set categories to display
+    if ("GREEN" %in% input$tlc_display_choice)
+        green_sel <- "green"
+    else 
+        green_sel <- "gray50"
+    
+    if ("YELLOW" %in% input$tlc_display_choice)
+        yellow_sel <- "yellow"
+    else
+        yellow_sel <- "gray50"
+    
+    if ("RED" %in% input$tlc_display_choice)
+        red_sel <- "red"
+    else
+        red_sel <- "gray50"
+    
+    # Make palette
+    tlc_bin_palette <- colorBin(
+        c(
+            red_sel, yellow_sel, green_sel
+        ),
+        0:400,
+        bins = c(0, yellow_low(), green_low(), 400)
+    )
+    
+    proxy_TLC <- leafletProxy("tlc_map")
+    
+    proxy_TLC %>% clearShapes() %>% clearControls() %>% 
+        
+        addPolygons(data = districts_shp,
+            color = "#444444",
+            weight = 1,
+            label = districts_shp$DISTRICT,
+            popup = popupTable(
+                districts_shp, 
+                zcol = tlc_popups,
+                row.numbers = FALSE
+            ),
+            smoothFactor = 1,
+            opacity = 1.0,
+            fillOpacity = 0.8,
+            fillColor = ~ tlc_bin_palette(int_score),
+            highlightOptions = highlightOptions(
+                color = "white",
+                weight = 2,
+                bringToFront = TRUE
+            )
+        ) %>%
+        
+        addLegend(
+            data = districts_shp,
+            "bottomright",
+            pal = tlc_bin_palette,
+            values = ~ int_score,
+            title = "Legend",
+            labFormat = labelFormat(""),
+            opacity = 1
+        )
+
+
+    
+    
+})
+
+
+leafletOutput("tlc_map")
+
+```
+
+<!--Industrial Classification-->
+
+Industrial Classification
+======================================================================
+
+
+<!--Download Data-->
+
+Download Data
+======================================================================
